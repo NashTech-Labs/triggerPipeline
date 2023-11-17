@@ -1,0 +1,99 @@
+parameters:
+- name: pipelineId
+  type: string
+
+- name: pipelineVariables
+  type: string
+
+- name: pipelineParameters
+  type: string
+
+- name: buildIdVariableName
+  type: string
+
+- name: pipelineDisplayName
+  type: string
+
+- name: setBuildIdInOutput
+  type: boolean
+  default: true
+
+- name: stepName
+  type: string
+
+- name: executeCondition
+  type: string
+
+
+steps:
+- pwsh: |
+    try {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $url = "$(ado.runPipelineURL)".Replace('{pipelineId}', '${{ parameters.pipelineId }}')
+
+      $base64EncodedAccessToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f "", $env:ADOAccessToken)))
+      $contentType = "application/json"
+      $headers = @{ 
+        Authorization = ("Basic {0}" -f $base64EncodedAccessToken)
+      }
+
+      $body = [PSCustomObject]@{
+        resources = [PSCustomObject]@{
+          repositories = [PSCustomObject]@{
+            self = [PSCustomObject]@{
+              refName = "refs/heads/master"
+            }
+          }
+        }
+        variables = [PSCustomObject]@{}
+        templateParameters = [PSCustomObject]@{}
+      } 
+
+      $inputVariables = '${{ parameters.pipelineVariables }}' | ConvertFrom-Json -Depth 10
+      $variables = [PSCustomObject]@{}
+      if ($inputVariables) {
+        $inputVariables | % {
+          $variables | Add-Member -NotePropertyName $_.name -NotePropertyValue ''
+          $variables."$($_.name)" = [PSCustomObject]@{
+            isSecret = $false
+            value = $_.value
+          }
+        }
+      }
+
+      $inputParameters = '${{ parameters.pipelineParameters }}' | ConvertFrom-Json -Depth 10
+      $templateParameters = [PSCustomObject]@{}
+      if ($inputParameters) {
+        $inputParameters | % {
+          $templateParameters | Add-Member -NotePropertyName $_.name -NotePropertyValue $_.value
+        }
+      }
+
+      $body.variables = $variables
+      $body.templateParameters = $templateParameters
+      $jsonBody = $body | ConvertTo-Json -Depth 10
+
+      $result = irm -Uri $url -Method Post -ContentType $contentType -Headers $headers -Body $jsonBody
+      if($result -eq $null -or $result.id -le 0){
+        Write-Host "##vso[task.logissue type=error]An error occurred while queuing the ${{ parameters.pipelineDisplayName }} pipeline run."
+        Write-Host "##vso[task.complete result=Failed;]An error occurred while queuing the ${{ parameters.pipelineDisplayName }} pipeline run."
+      }
+      else {
+        if ('${{ parameters.setBuildIdInOutput }}'.ToLower() -eq 'true') {
+          Write-Host "Build Id: $($result.id)"
+          Write-Host "##vso[task.setvariable variable=${{ parameters.buildIdVariableName }};isOutput=true]$($result.id)"
+        }
+        Write-Host "Triggered $($result.pipeline.name) pipeline with build id: $($result.id) and build number: $($result.name)."
+      }
+    }
+    catch {
+      throw $_
+    }
+  name: ${{ coalesce(parameters.stepName, 'TriggerPipeline') }}
+  displayName: Trigger ${{ parameters.pipelineDisplayName }} Pipeline
+  ${{ if parameters.executeCondition }}:
+    condition: ${{ parameters.executeCondition }}
+  retryCountOnTaskFailure: 1
+  failOnStderr: true
+  env:
+    ADOAccessToken: $(AzureDevOpsRestApiBuildUserAccessToken)
